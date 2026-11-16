@@ -128,6 +128,9 @@ function servedModels(): ServedModel[] {
   return freeModels(brief).map((model) => ({ id: model.id, provider: model.provider, display_name: model.display_name }));
 }
 
+/** Interval for polling the env. */
+const POLL_INTERVAL_MS = 100;
+
 /** Models currently cooling down. */
 const cooldowns = new Map<string, number>();
 const COOLDOWN_MS = 60000;
@@ -154,12 +157,12 @@ function routeFor(requires: Requirement): ModelRow | null {
 }
 
 /** The requirements of the prompt now arriving: the brief's row by arrival order, else the body's own. */
-function requirementsFor(body: Json): Requirement {
+function requirementsFor(body: Json, peek = false): Requirement {
   const entry = brief.prompts[manifestIndex];
-  manifestIndex += 1;
+  if (!peek) {
+    manifestIndex += 1;
+  }
   if (entry !== undefined) return entry.requires;
-  // TODO(workload): the brief's prompt list is the declared source of each request's requirements; this
-  // fallback is a guess for a brief that holds none.
   return requirementsFromBody(body);
 }
 
@@ -244,18 +247,18 @@ async function chat(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readJson(req);
   if (body === null) return sendError(res, 'openai', 400, 'invalid_request_error', 'the request body is not one JSON object');
   
-  let route = routeFor(requirementsFor(body));
+  const reqRequirements = requirementsFor(body);
+
+  let route = routeFor(reqRequirements);
   if (route === null) return sendError(res, 'openai', 503, 'no_free_model', 'no free model in the brief meets this request');
   
   let upstream: Response;
-  let attempts = 0;
   while (true) {
     try {
       upstream = await dial(route.id, { ...body, model: route.id });
       if (upstream.status === 429 || (upstream.status >= 500 && upstream.status <= 599)) {
         markCooldown(route.id);
-        attempts++;
-        const next = routeFor(requirementsFor(body));
+        const next = routeFor(reqRequirements);
         if (next) {
           route = next;
           continue;
@@ -289,7 +292,9 @@ async function messages(req: IncomingMessage, res: ServerResponse): Promise<void
   const body = await readJson(req);
   if (body === null) return sendError(res, 'anthropic', 400, 'invalid_request_error', 'the request body is not one JSON object');
   
-  let route = routeFor(requirementsFor(body));
+  const reqRequirements = requirementsFor(body);
+  
+  let route = routeFor(reqRequirements);
   if (route === null) return sendError(res, 'anthropic', 503, 'overloaded_error', 'no free model in the brief meets this request');
   
   let upstream: Response;
@@ -298,7 +303,7 @@ async function messages(req: IncomingMessage, res: ServerResponse): Promise<void
       upstream = await dial(route.id, anthropicToOpenAI(body, route.id));
       if (upstream.status === 429 || (upstream.status >= 500 && upstream.status <= 599)) {
         markCooldown(route.id);
-        const next = routeFor(requirementsFor(body));
+        const next = routeFor(reqRequirements);
         if (next) {
           route = next;
           continue;
