@@ -110,12 +110,49 @@ function argumentsOf(value: unknown): Json {
   return {};
 }
 
-/** OpenAI's finish_reason as Anthropic's stop_reason. */
-export function stopReasonOf(finish: unknown): string {
-  if (finish === 'length') return 'max_tokens';
-  if (finish === 'tool_calls' || finish === 'function_call') return 'tool_use';
-  if (finish === 'content_filter') return 'refusal';
-  return 'end_turn';
+/** The gateway's tool_call response as an Anthropic tool_use block and input_json_delta. */
+export function toolCallsToAnthropic(
+  toolCalls: unknown[],
+  toolIndexes: Map<number, number>,
+  nextIndex: number
+): { events: string[]; nextIndex: number } {
+  const events: string[] = [];
+  let currentNextIndex = nextIndex;
+
+  for (const call of toolCalls) {
+    if (!isRecord(call) || !isRecord(call.function)) continue;
+    const upstreamIndex = typeof call.index === 'number' ? call.index : toolIndexes.size;
+    let index = toolIndexes.get(upstreamIndex);
+    if (index === undefined) {
+      index = currentNextIndex;
+      currentNextIndex += 1;
+      toolIndexes.set(upstreamIndex, index);
+      events.push(
+        sseEvent('content_block_start', {
+          type: 'content_block_start',
+          index,
+          content_block: {
+            type: 'tool_use',
+            id: typeof call.id === 'string' && call.id !== '' ? call.id : `toolu_${index}`,
+            name: typeof call.function.name === 'string' ? call.function.name : '',
+            input: argumentsOf(call.function.arguments),
+          },
+        }),
+      );
+    } else {
+      const fn = call.function;
+      if (typeof fn.arguments === 'string' && fn.arguments !== '') {
+        events.push(
+          sseEvent('content_block_delta', {
+            type: 'content_block_delta',
+            index,
+            delta: { type: 'input_json_delta', partial_json: fn.arguments },
+          })
+        );
+      }
+    }
+  }
+  return { events, nextIndex: currentNextIndex };
 }
 
 /**
@@ -401,36 +438,14 @@ export async function* anthropicEventsFromOpenAI(upstream: ReadableStream<Uint8A
         out.push(sseEvent('content_block_delta', { type: 'content_block_delta', index: textIndex, delta: { type: 'text_delta', text: delta.content } }));
       }
       const calls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
-      for (const call of calls) {
-        if (!isRecord(call)) continue;
-        const upstreamIndex = typeof call.index === 'number' ? call.index : toolIndexes.size;
-        let index = toolIndexes.get(upstreamIndex);
-        if (index === undefined) {
-          if (textIndex !== -1) {
-            out.push(sseEvent('content_block_stop', { type: 'content_block_stop', index: textIndex }));
-            textIndex = -1;
-          }
-          index = nextIndex;
-          nextIndex += 1;
-          toolIndexes.set(upstreamIndex, index);
-          const fn = isRecord(call.function) ? call.function : {};
-          out.push(
-            sseEvent('content_block_start', {
-              type: 'content_block_start',
-              index,
-              content_block: {
-                type: 'tool_use',
-                id: typeof call.id === 'string' && call.id !== '' ? call.id : `toolu_${index}`,
-                name: typeof fn.name === 'string' ? fn.name : '',
-                input: {},
-              },
-            }),
-          );
+      if (calls.length > 0) {
+        if (textIndex !== -1) {
+          out.push(sseEvent('content_block_stop', { type: 'content_block_stop', index: textIndex }));
+          textIndex = -1;
         }
-        const fn = isRecord(call.function) ? call.function : {};
-        if (typeof fn.arguments === 'string' && fn.arguments !== '') {
-          out.push(sseEvent('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: fn.arguments } }));
-        }
+        const toolResult = toolCallsToAnthropic(calls, toolIndexes, nextIndex);
+        out.push(...toolResult.events);
+        nextIndex = toolResult.nextIndex;
       }
       // Hold the stop reason until the stream's last chunk (the usage one) and [DONE] have arrived: OpenAI
       // sends the usage after the finish_reason, and Anthropic's message_delta carries the output tokens.
