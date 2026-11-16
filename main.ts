@@ -263,8 +263,11 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 function sendError(res: ServerResponse, wire: 'openai' | 'anthropic', status: number, type: string, message: string): void {
-  if (wire === 'anthropic') sendJson(res, status, anthropicError(type, message));
-  else sendJson(res, status, openAIError(message, type, null));
+  if (wire === 'anthropic') {
+    sendJson(res, status, { type: 'error', error: { type, message } });
+  } else {
+    sendJson(res, status, openAIError(message, type, null));
+  }
 }
 
 /** GET /v1/models, in the shape of the auth header the client sent. */
@@ -305,8 +308,8 @@ async function chat(req: IncomingMessage, res: ServerResponse, reqId: string): P
   if (body === null) return sendError(res, 'openai', 400, 'invalid_request_error', 'the request body is not one JSON object');
   
   const validation = validateRequest(req.method!, req.url!, req.headers as Record<string, string>, body, servedModels().map(m => m.id));
-  if (!validation.valid) {
-      return sendJson(res, validation.status, validation.error);
+  if (!validation || !validation.valid) {
+    return sendJson(res, validation?.status ?? 400, validation?.error ?? { error: { message: 'invalid request' } });
   }
 
   // Ensure system prompt forwarding is preserved.
@@ -362,8 +365,8 @@ async function messages(req: IncomingMessage, res: ServerResponse): Promise<void
   if (body === null) return sendError(res, 'anthropic', 400, 'invalid_request_error', 'the request body is not one JSON object');
   
   const validation = validateRequest(req.method!, req.url!, req.headers as Record<string, string>, body, servedModels().map(m => m.id));
-  if (!validation.valid) {
-      return sendJson(res, validation.status, validation.error);
+  if (!validation || !validation.valid) {
+    return sendJson(res, validation?.status ?? 400, validation?.error ?? { error: { message: 'invalid request' } });
   }
 
   // Ensure system prompt forwarding is preserved.
