@@ -317,7 +317,10 @@ async function chat(req: IncomingMessage, res: ServerResponse, reqId: string): P
         }
         return refused(res, 'openai', upstream.status, await upstream.text());
       }
+      recordSuccess(route.id);
+      usageLedger.record(route.id, await upstream.clone().json());
       break;
+
     } catch (err) {
       logDiagnostic('GATEWAY_ERROR', reqId, (err as Error).message);
       return sendError(res, 'openai', 502, 'upstream_unreachable', (err as Error).message);
