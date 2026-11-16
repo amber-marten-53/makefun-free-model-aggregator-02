@@ -97,9 +97,21 @@ function getNow(): number {
 }
 /** The most bytes of one client request body this baseline reads. */
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
-/** Logger for tracing request/response cycle for debugging failures. */
-function logTrace(requestId: string, message: string): void {
-  process.stderr.write(`[${new Date().toISOString()}] [${requestId}] ${message}\n`);
+/**
+ * Helper to log detailed errors to stderr, aiding in identifying gateway issues.
+ * @param reqId A unique request identifier.
+ * @param msg The error message or context.
+ */
+function logGatewayError(reqId: string, msg: string): void {
+  const ts = new Date().toISOString();
+  process.stderr.write(`[${ts}] [GATEWAY_FAIL] [${reqId}] ${msg}\n`);
+}
+
+/**
+ * Enhanced request tracing for debugging.
+ */
+function traceRequest(reqId: string, info: string): void {
+  process.stderr.write(`[${new Date().toISOString()}] [TRACE] [${reqId}] ${info}\n`);
 }
 
 const ENV_URL = (process.env.MAKEFUN_ENV_URL ?? '').replace(/\/+$/, '');
@@ -438,9 +450,13 @@ async function start(): Promise<void> {
   if (ENV_URL === '') throw new Error('MAKEFUN_ENV_URL is not set');
   if (chatCompletionsUrl() === '') throw new Error('OPENAI_BASE_URL is not set');
   const server = createServer((req, res) => {
+    const reqId = Math.random().toString(36).substring(2, 9);
+    traceRequest(reqId, `received ${req.method} ${req.url}`);
+    
     if (req.url === '/health') return handleHealthCheck(res);
+    
     void handle(req, res).catch((err: unknown) => {
-      log((err as Error).stack ?? String(err));
+      logGatewayError(reqId, (err as Error).stack ?? String(err));
       if (!res.headersSent) sendError(res, req.url?.startsWith('/v1/messages') === true ? 'anthropic' : 'openai', 500, 'internal_error', 'the server failed to answer');
     });
   });
