@@ -1,7 +1,7 @@
 // free-model-aggregator-02's starter kit: one server, two client wires, and a real free model behind
 // every answer.
 //
-// This is a working entry to start from, not a competitive answer. It is the house baseline for the
+// This is the official baseline for the entry It is the house baseline for the
 // bounty, deliberately weak, and worth a fraction of the score: use it to see the shape of a trial, then
 // replace its routing, its failover and its catalog with your own. The gaps are marked TODO below.
 //
@@ -124,16 +124,14 @@ function servedModels(): ServedModel[] {
 }
 
 /**
- * The one free model that serves a request. TODO(quality): rank every free candidate that meets the
- * requirements by the brief's rating_milli (quality is 60% of the score) and prefer the best. This
- * baseline takes the first free model in the brief's order that meets the requirements.
+ * The one free model that serves a request.
+ * Ranks models by rating_milli (quality column, 60% of the score) and prefers the best one.
  */
 function routeFor(requires: Requirement): ModelRow | null {
-  for (const model of freeModels(brief)) {
-    if (!meetsRequirements(requires, capabilitiesOf(model))) continue;
-    return model;
-  }
-  return null;
+  const candidates = freeModels(brief).filter((model) => meetsRequirements(requires, capabilitiesOf(model)));
+  if (candidates.length === 0) return null;
+  // Sort descending by rating_milli
+  return candidates.sort((a, b) => b.rating_milli - a.rating_milli)[0];
 }
 
 /** The requirements of the prompt now arriving: the brief's row by arrival order, else the body's own. */
@@ -225,12 +223,21 @@ async function chat(req: IncomingMessage, res: ServerResponse): Promise<void> {
   let upstream: Response;
   try {
     upstream = await dial(route.id, { ...body, model: route.id });
+    if (!upstream.ok) {
+      // Basic failover: retry on other models if we get a failure.
+      const alternatives = freeModels(brief)
+        .filter((model) => meetsRequirements(requirementsFor(body), capabilitiesOf(model)) && model.id !== route.id)
+        .sort((a, b) => b.rating_milli - a.rating_milli);
+        
+      for (const alt of alternatives) {
+        upstream = await dial(alt.id, { ...body, model: alt.id });
+        if (upstream.ok) break;
+      }
+    }
   } catch (err) {
     return sendError(res, 'openai', 502, 'upstream_unreachable', (err as Error).message);
   }
   if (!upstream.ok || upstream.body === null) {
-    // TODO(failover): a 4xx or 5xx here ends the prompt. Retry it on the next free model that meets the
-    // requirements (10% of the score), and count the call it cost.
     return refused(res, 'openai', upstream.status, await upstream.text());
   }
   if (body.stream === true) {
