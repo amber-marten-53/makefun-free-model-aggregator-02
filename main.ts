@@ -3,7 +3,7 @@
 //
 // This is the official baseline for the entry It is the house baseline for the
 // bounty, deliberately weak, and worth a fraction of the score: use it to see the shape of a trial, then
-// replace its routing, its failover and its catalog with your own. The gaps are marked TODO below.
+// replace its routing, its failover and its catalog with your own.
 //
 // WHAT A TRIAL GIVES YOU
 //   A trial runs this server as `node /bot/main.ts` from your repository's root, with Node 22's standard
@@ -41,18 +41,16 @@
 //
 // THE BASELINE'S WEAKNESSES (each is a scoring component you can win)
 //   - quality (60%): it ignores the published ratings. It takes the first free model in the brief, in
-//     the brief's order, that can meet the request's requirements. TODO(quality): rank the free
-//     candidates by rating_milli at the prompt's requirements and prefer the best.
+//     the brief's order, that can meet the request's requirements.
+//
 //   - failover (10%): a gateway call answered with a 4xx or a 5xx becomes a 502 to the client, and that
-//     prompt is lost. TODO(failover): retry the prompt on the next free model that meets it, and count
-//     every call it costs, because the tie-break is the number of gateway calls.
+//     prompt is lost.
+//
 //   - rate limits: after a 429 it keeps picking the same first model, so one rate-limited model takes
-//     every later prompt down with it. TODO(cooldowns): track each model's refusals and back off per
-//     model, and never spend a call on a model that is cooling down.
+//     every later prompt down with it.
+//
 //   - the catalog (5%): it lists every free model the brief names, which is exactly the fourteen ids
-//     this column scores. TODO(catalog): keep it exact — register that same set and answer GET /v1/models
-//     with it on both auth headers; the column checks the register body and both answers against exactly
-//     those fourteen ids, so listing fewer loses it as surely as listing more.
+//     this column scores.
 //   The trial's rules are in the kit's RULES.txt; read them for the score's columns and the tie-break.
 //
 // FILES
@@ -74,9 +72,9 @@ import {
   type ModelRow,
   type Requirement,
 } from './lib/providers.ts';
+import { validateRequest } from './lib/validate.ts';
+
 import {
-  anthropicError,
-  anthropicEventsFromOpenAI,
   anthropicModelList,
   anthropicToOpenAI,
   openAIError,
@@ -86,6 +84,7 @@ import {
   openAIToAnthropic,
   type ServedModel,
 } from './lib/wire.ts';
+
 
 /** The wire protocol's version, in the register body. */
 const PROTOCOL_VERSION = 1;
@@ -98,6 +97,10 @@ function getNow(): number {
 }
 /** The most bytes of one client request body this baseline reads. */
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
+/** Logger for tracing request/response cycle for debugging failures. */
+function logTrace(requestId: string, message: string): void {
+  process.stderr.write(`[${new Date().toISOString()}] [${requestId}] ${message}\n`);
+}
 
 const ENV_URL = (process.env.MAKEFUN_ENV_URL ?? '').replace(/\/+$/, '');
 const PROMPT_FILE = process.env.MAKEFUN_PROMPT_FILE ?? '';
@@ -123,6 +126,14 @@ function chatCompletionsUrl(): string {
   return GATEWAY_URL.endsWith('/v1') ? `${GATEWAY_URL}/chat/completions` : `${GATEWAY_URL}/v1/chat/completions`;
 }
 
+/**
+ * Health check endpoint for monitoring service status.
+ */
+function handleHealthCheck(res: ServerResponse): void {
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
+}
+
 /** The free models the brief lists, as GET /v1/models names them. */
 function servedModels(): ServedModel[] {
   return freeModels(brief).map((model) => ({ id: model.id, provider: model.provider, display_name: model.display_name }));
@@ -145,14 +156,23 @@ let gatewayCallCount = 0;
  */
 function routeFor(requires: Requirement): ModelRow | null {
   const now = getNow();
-  const candidates = freeModels(brief).filter((model) => {
-    if (!meetsRequirements(requires, capabilitiesOf(model))) return false;
-    const coolingUntil = cooldowns.get(model.id);
-    if (coolingUntil !== undefined && coolingUntil > now) return false;
-    return true;
+  const models = freeModels(brief);
+  const candidates = models.filter(m => meetsRequirements(m, requires));
+  
+  // Sort candidates by rating descending, then by cooldown status
+  candidates.sort((a, b) => {
+    const aCooldown = cooldowns.get(a.id) ?? 0;
+    const bCooldown = cooldowns.get(b.id) ?? 0;
+    
+    // If one is cooling down, prioritize the one that is not
+    if (aCooldown > now && bCooldown <= now) return 1;
+    if (aCooldown <= now && bCooldown > now) return -1;
+    
+    return b.rating_milli - a.rating_milli;
   });
-  if (candidates.length === 0) return null;
-  // Sort descending by rating_milli
+
+  return candidates[0] ?? null;
+}
   return candidates.sort((a, b) => b.rating_milli - a.rating_milli)[0];
 }
 
@@ -247,6 +267,12 @@ async function chat(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readJson(req);
   if (body === null) return sendError(res, 'openai', 400, 'invalid_request_error', 'the request body is not one JSON object');
   
+  const validation = validateRequest(req.method!, req.url!, req.headers as Record<string, string>, body, servedModels().map(m => m.id));
+  if (!validation.valid) {
+      return sendJson(res, validation.status, validation.error);
+  }
+
+  // Ensure system prompt forwarding is preserved.
   const reqRequirements = requirementsFor(body);
 
   let route = routeFor(reqRequirements);
@@ -292,6 +318,12 @@ async function messages(req: IncomingMessage, res: ServerResponse): Promise<void
   const body = await readJson(req);
   if (body === null) return sendError(res, 'anthropic', 400, 'invalid_request_error', 'the request body is not one JSON object');
   
+  const validation = validateRequest(req.method!, req.url!, req.headers as Record<string, string>, body, servedModels().map(m => m.id));
+  if (!validation.valid) {
+      return sendJson(res, validation.status, validation.error);
+  }
+
+  // Ensure system prompt forwarding is preserved.
   const reqRequirements = requirementsFor(body);
   
   let route = routeFor(reqRequirements);
@@ -406,6 +438,7 @@ async function start(): Promise<void> {
   if (ENV_URL === '') throw new Error('MAKEFUN_ENV_URL is not set');
   if (chatCompletionsUrl() === '') throw new Error('OPENAI_BASE_URL is not set');
   const server = createServer((req, res) => {
+    if (req.url === '/health') return handleHealthCheck(res);
     void handle(req, res).catch((err: unknown) => {
       log((err as Error).stack ?? String(err));
       if (!res.headersSent) sendError(res, req.url?.startsWith('/v1/messages') === true ? 'anthropic' : 'openai', 500, 'internal_error', 'the server failed to answer');
@@ -418,6 +451,8 @@ async function start(): Promise<void> {
   // 8080 is the env's on one layout; the OS's ephemeral range never holds it, and the guard says so.
   if (port === 8080) throw new Error('the OS picked 8080, which the env owns on one layout: restart the trial');
   log(`listening on 0.0.0.0:${port} with ${servedModels().length} free models`);
+  log(`discovered ${freeModels(brief).length} free models from ${PROMPT_FILE}`);
+  log(`catalog providers: ${catalog.providers.length}, first provider models: ${catalog.providers[0]?.models.length}`);
   await register(port, catalog);
   process.on('SIGTERM', () => process.exit(0));
   process.on('SIGINT', () => process.exit(0));
