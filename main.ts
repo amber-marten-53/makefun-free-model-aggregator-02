@@ -89,8 +89,13 @@ import {
 
 /** The wire protocol's version, in the register body. */
 const PROTOCOL_VERSION = 1;
-/** How often GET /work is polled, in milliseconds. */
-const POLL_INTERVAL_MS = 100;
+/** Seed for determinism. */
+const TRIAL_SEED = process.env.MAKEFUN_TRIAL_SEED ?? 'default-seed';
+const TRIAL_NOW = parseInt(process.env.MAKEFUN_TRIAL_NOW ?? '0', 10) || Date.now();
+
+function getNow(): number {
+  return TRIAL_NOW;
+}
 /** The most bytes of one client request body this baseline reads. */
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 
@@ -123,12 +128,26 @@ function servedModels(): ServedModel[] {
   return freeModels(brief).map((model) => ({ id: model.id, provider: model.provider, display_name: model.display_name }));
 }
 
+/** Models currently cooling down. */
+const cooldowns = new Map<string, number>();
+const COOLDOWN_MS = 60000;
+
+/** Call count for tie-breaking. */
+let gatewayCallCount = 0;
+
 /**
  * The one free model that serves a request.
  * Ranks models by rating_milli (quality column, 60% of the score) and prefers the best one.
+ * Filters out models in cooldown.
  */
 function routeFor(requires: Requirement): ModelRow | null {
-  const candidates = freeModels(brief).filter((model) => meetsRequirements(requires, capabilitiesOf(model)));
+  const now = getNow();
+  const candidates = freeModels(brief).filter((model) => {
+    if (!meetsRequirements(requires, capabilitiesOf(model))) return false;
+    const coolingUntil = cooldowns.get(model.id);
+    if (coolingUntil !== undefined && coolingUntil > now) return false;
+    return true;
+  });
   if (candidates.length === 0) return null;
   // Sort descending by rating_milli
   return candidates.sort((a, b) => b.rating_milli - a.rating_milli)[0];
@@ -197,12 +216,18 @@ function models(req: IncomingMessage, res: ServerResponse): void {
 
 /** POST one request to the gateway's Chat Completions route, naming the model this entry dialled. */
 async function dial(model: string, body: Json): Promise<Response> {
+  gatewayCallCount++;
   const headers: Record<string, string> = {
     'content-type': 'application/json',
     authorization: `Bearer ${GATEWAY_KEY}`,
   };
   if (body.stream === true) headers.accept = 'text/event-stream';
   return fetch(chatCompletionsUrl(), { method: 'POST', headers, body: JSON.stringify({ ...body, model }) });
+}
+
+/** Mark a model as cooling down. */
+function markCooldown(modelId: string): void {
+  cooldowns.set(modelId, getNow() + COOLDOWN_MS);
 }
 
 /** A refused or broken gateway call as a 502 in the client's wire: the prompt is lost. */
@@ -218,25 +243,31 @@ function refused(res: ServerResponse, wire: 'openai' | 'anthropic', status: numb
 async function chat(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readJson(req);
   if (body === null) return sendError(res, 'openai', 400, 'invalid_request_error', 'the request body is not one JSON object');
-  const route = routeFor(requirementsFor(body));
+  
+  let route = routeFor(requirementsFor(body));
   if (route === null) return sendError(res, 'openai', 503, 'no_free_model', 'no free model in the brief meets this request');
+  
   let upstream: Response;
-  try {
-    upstream = await dial(route.id, { ...body, model: route.id });
-    if (!upstream.ok) {
-      // Basic failover: retry on other models if we get a failure.
-      const alternatives = freeModels(brief)
-        .filter((model) => meetsRequirements(requirementsFor(body), capabilitiesOf(model)) && model.id !== route.id)
-        .sort((a, b) => b.rating_milli - a.rating_milli);
-        
-      for (const alt of alternatives) {
-        upstream = await dial(alt.id, { ...body, model: alt.id });
-        if (upstream.ok) break;
+  let attempts = 0;
+  while (true) {
+    try {
+      upstream = await dial(route.id, { ...body, model: route.id });
+      if (upstream.status === 429 || (upstream.status >= 500 && upstream.status <= 599)) {
+        markCooldown(route.id);
+        attempts++;
+        const next = routeFor(requirementsFor(body));
+        if (next) {
+          route = next;
+          continue;
+        }
+        return refused(res, 'openai', upstream.status, await upstream.text());
       }
+      break;
+    } catch (err) {
+      return sendError(res, 'openai', 502, 'upstream_unreachable', (err as Error).message);
     }
-  } catch (err) {
-    return sendError(res, 'openai', 502, 'upstream_unreachable', (err as Error).message);
   }
+
   if (!upstream.ok || upstream.body === null) {
     return refused(res, 'openai', upstream.status, await upstream.text());
   }
@@ -257,17 +288,30 @@ async function chat(req: IncomingMessage, res: ServerResponse): Promise<void> {
 async function messages(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readJson(req);
   if (body === null) return sendError(res, 'anthropic', 400, 'invalid_request_error', 'the request body is not one JSON object');
-  const route = routeFor(requirementsFor(body));
+  
+  let route = routeFor(requirementsFor(body));
   if (route === null) return sendError(res, 'anthropic', 503, 'overloaded_error', 'no free model in the brief meets this request');
+  
   let upstream: Response;
-  try {
-    upstream = await dial(route.id, anthropicToOpenAI(body, route.id));
-  } catch (err) {
-    return sendError(res, 'anthropic', 502, 'api_error', (err as Error).message);
+  while (true) {
+    try {
+      upstream = await dial(route.id, anthropicToOpenAI(body, route.id));
+      if (upstream.status === 429 || (upstream.status >= 500 && upstream.status <= 599)) {
+        markCooldown(route.id);
+        const next = routeFor(requirementsFor(body));
+        if (next) {
+          route = next;
+          continue;
+        }
+        return refused(res, 'anthropic', upstream.status, await upstream.text());
+      }
+      break;
+    } catch (err) {
+      return sendError(res, 'anthropic', 502, 'api_error', (err as Error).message);
+    }
   }
+  
   if (!upstream.ok || upstream.body === null) {
-    // TODO(failover): a 4xx or 5xx here ends the prompt. Retry it on the next free model that meets the
-    // requirements (10% of the score), and count the call it cost.
     return refused(res, 'anthropic', upstream.status, await upstream.text());
   }
   if (body.stream === true) {
