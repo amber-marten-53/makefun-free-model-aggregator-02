@@ -73,6 +73,10 @@ import {
   type Requirement,
 } from './lib/providers.ts';
 import { validateRequest } from './lib/validate.ts';
+import {
+  HealthRegistry,
+  classifyHttpStatus,
+} from './lib/health.ts';
 
 import {
   logDiagnostic,
@@ -166,6 +170,15 @@ const COOLDOWN_MS = 60000;
 
 /** Call count for tie-breaking. */
 let gatewayCallCount = 0;
+/** Live health of the model gateway, tracked across dial attempts. */
+const gatewayHealth = new HealthRegistry();
+function noteGatewayOutcome(status: number, latencyMs: number): void {
+  gatewayHealth.register('gateway', chatCompletionsUrl());
+  gatewayHealth.recordOutcome('gateway', classifyHttpStatus(status) === 'up', latencyMs, status >= 400 ? `gateway http ${status}` : undefined);
+}
+function gatewayHealthSummary(): string {
+  return gatewayHealth.formatReport();
+}
 
 /**
  * The one free model that serves a request.
@@ -462,6 +475,13 @@ async function start(): Promise<void> {
     // The same document the register body carries, byte for byte: print the one built object and stop
     // before any server starts. A process whose stdout is not flushed loses the tail, so wait for it.
     const text = `${JSON.stringify(catalog)}\n`;
+    await new Promise<void>((resolve) => process.stdout.write(text, () => resolve()));
+    process.exit(0);
+  }
+  if (process.argv.includes('--health')) {
+    gatewayHealth.register('gateway', chatCompletionsUrl());
+    const text = `${gatewayHealth.formatReport()}
+`;
     await new Promise<void>((resolve) => process.stdout.write(text, () => resolve()));
     process.exit(0);
   }
