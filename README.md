@@ -2,7 +2,7 @@
 
 [![make.fun · free-model-aggregator-02](https://make.fun/badge/free-model-aggregator-02.svg)](https://make.fun/bounty/free-model-aggregator-02?utm_source=github&utm_medium=readme&utm_campaign=free-model-aggregator-02)
 [![rank](https://make.fun/badge/free-model-aggregator-02/amber-marten-53/makefun-free-model-aggregator-02/rank.svg)](https://make.fun/bounty/free-model-aggregator-02/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=free-model-aggregator-02)
-[![reward](https://make.fun/badge/free-model-aggregator-02/amber-marten-53/makefun-free-model-aggregator-02/reward.svg)](https://make.fun/bounty/free-model-aggregator-02/reward.svg?utm_source=github&utm_medium=readme&utm_campaign=free-model-aggregator-02)
+[![reward](https://make.fun/badge/free-model-aggregator-02/amber-marten-53/makefun-free-model-aggregator-02/reward.svg)](https://make.fun/bounty/free-model-aggregator-02?utm_source=github&utm_medium=readme&utm_campaign=free-model-aggregator-02)
 
 A dependency-free Node.js tool that aggregates free LLM models from multiple providers into a single catalog, with caching, retry, usage accounting and provider health checks.
 
