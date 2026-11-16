@@ -75,6 +75,12 @@ import {
 import { validateRequest } from './lib/validate.ts';
 
 import {
+  logDiagnostic,
+  logSystemEvent,
+} from './lib/debug.ts';
+
+import {
+  anthropicEventsFromOpenAI,
   anthropicModelList,
   anthropicToOpenAI,
   openAIError,
@@ -166,10 +172,12 @@ let gatewayCallCount = 0;
  * Ranks models by rating_milli (quality column, 60% of the score) and prefers the best one.
  * Filters out models in cooldown.
  */
-function routeFor(requires: Requirement): ModelRow | null {
+function routeFor(requires: Requirement, reqId: string): ModelRow | null {
   const now = getNow();
   const models = freeModels(brief);
   const candidates = models.filter(m => meetsRequirements(m, requires));
+  
+  logDiagnostic('ROUTING', reqId, \`evaluating \${candidates.length} candidates for \${JSON.stringify(requires)}\`);
   
   // Sort candidates by rating descending, then by cooldown status
   candidates.sort((a, b) => {
@@ -183,7 +191,13 @@ function routeFor(requires: Requirement): ModelRow | null {
     return b.rating_milli - a.rating_milli;
   });
 
-  return candidates[0] ?? null;
+  const selected = candidates[0] ?? null;
+  if (selected) {
+    logDiagnostic('ROUTING', reqId, \`selected model: \${selected.id}\`);
+  } else {
+    logDiagnostic('ROUTING', reqId, \`no eligible model found\`);
+  }
+  return selected;
 }
   return candidates.sort((a, b) => b.rating_milli - a.rating_milli)[0];
 }
@@ -275,7 +289,7 @@ function refused(res: ServerResponse, wire: 'openai' | 'anthropic', status: numb
 }
 
 /** POST /v1/chat/completions: an OpenAI-shaped client, answered by the first free model that meets it. */
-async function chat(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function chat(req: IncomingMessage, res: ServerResponse, reqId: string): Promise<void> {
   const body = await readJson(req);
   if (body === null) return sendError(res, 'openai', 400, 'invalid_request_error', 'the request body is not one JSON object');
   
@@ -287,16 +301,18 @@ async function chat(req: IncomingMessage, res: ServerResponse): Promise<void> {
   // Ensure system prompt forwarding is preserved.
   const reqRequirements = requirementsFor(body);
 
-  let route = routeFor(reqRequirements);
+  let route = routeFor(reqRequirements, reqId);
   if (route === null) return sendError(res, 'openai', 503, 'no_free_model', 'no free model in the brief meets this request');
   
   let upstream: Response;
   while (true) {
     try {
+      logDiagnostic('GATEWAY_CALL', reqId, \`dialing \${route.id}\`);
       upstream = await dial(route.id, { ...body, model: route.id });
       if (upstream.status === 429 || (upstream.status >= 500 && upstream.status <= 599)) {
+        logDiagnostic('GATEWAY_FAIL', reqId, \`status \${upstream.status} from \${route.id}\`);
         markCooldown(route.id);
-        const next = routeFor(reqRequirements);
+        const next = routeFor(reqRequirements, reqId);
         if (next) {
           route = next;
           continue;
@@ -305,6 +321,7 @@ async function chat(req: IncomingMessage, res: ServerResponse): Promise<void> {
       }
       break;
     } catch (err) {
+      logDiagnostic('GATEWAY_ERROR', reqId, (err as Error).message);
       return sendError(res, 'openai', 502, 'upstream_unreachable', (err as Error).message);
     }
   }
@@ -451,12 +468,12 @@ async function start(): Promise<void> {
   if (chatCompletionsUrl() === '') throw new Error('OPENAI_BASE_URL is not set');
   const server = createServer((req, res) => {
     const reqId = Math.random().toString(36).substring(2, 9);
-    traceRequest(reqId, `received ${req.method} ${req.url}`);
+    logDiagnostic('REQUEST_START', reqId, \`\${req.method} \${req.url}\`);
     
     if (req.url === '/health') return handleHealthCheck(res);
     
     void handle(req, res).catch((err: unknown) => {
-      logGatewayError(reqId, (err as Error).stack ?? String(err));
+      logDiagnostic('REQUEST_ERROR', reqId, (err as Error).stack ?? String(err));
       if (!res.headersSent) sendError(res, req.url?.startsWith('/v1/messages') === true ? 'anthropic' : 'openai', 500, 'internal_error', 'the server failed to answer');
     });
   });

@@ -60,6 +60,14 @@ export function anthropicError(type: string, message: string): Json {
   return { type: 'error', error: { type, message } };
 }
 
+/** Translates an OpenAI finish_reason to an Anthropic stop_reason. */
+function stopReasonOf(finishReason: unknown): string | null {
+  if (finishReason === 'stop') return 'end_turn';
+  if (finishReason === 'max_tokens') return 'max_tokens';
+  if (finishReason === 'tool_calls') return 'tool_use';
+  return null;
+}
+
 /** An error in OpenAI's shape (Chat Completions). */
 export function openAIError(message: string, type: string, code: string | null): Json {
   return { error: { message, type, code } };
