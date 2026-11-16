@@ -1,9 +1,0 @@
-{"messages": [
-  {"role": "user", "content": "I am working on step 1: Cooldowns"},
-  {"role": "assistant", "content": "Implemented Cooldowns and wired them into routeFor() and dial()"},
-  {"role": "user", "content": "I am working on step 2: Failover"},
-  {"role": "assistant", "content": "Implemented gateway retries on 429/5xx"},
-  {"role": "user", "content": "I am working on step 3: Determinism"},
-  {"role": "assistant", "content": "Replaced Date.now() with getNow() using MAKEFUN_TRIAL_NOW"}
-],
-"handed_over": "my tool, a coding assistant inside a harness, doesn't keep persistent session logs in the repo"}
