@@ -177,7 +177,7 @@ function routeFor(requires: Requirement, reqId: string): ModelRow | null {
   const models = freeModels(brief);
   const candidates = models.filter(m => meetsRequirements(m, requires));
   
-  logDiagnostic('ROUTING', reqId, \`evaluating \${candidates.length} candidates for \${JSON.stringify(requires)}\`);
+  logDiagnostic('ROUTING', reqId, `evaluating ${candidates.length} candidates for ${JSON.stringify(requires)}`);
   
   // Sort candidates by rating descending, then by cooldown status
   candidates.sort((a, b) => {
@@ -193,13 +193,11 @@ function routeFor(requires: Requirement, reqId: string): ModelRow | null {
 
   const selected = candidates[0] ?? null;
   if (selected) {
-    logDiagnostic('ROUTING', reqId, \`selected model: \${selected.id}\`);
+    logDiagnostic('ROUTING', reqId, `selected model: ${selected.id}`);
   } else {
-    logDiagnostic('ROUTING', reqId, \`no eligible model found\`);
+    logDiagnostic('ROUTING', reqId, `no eligible model found`);
   }
   return selected;
-}
-  return candidates.sort((a, b) => b.rating_milli - a.rating_milli)[0];
 }
 
 /** The requirements of the prompt now arriving: the brief's row by arrival order, else the body's own. */
@@ -307,10 +305,10 @@ async function chat(req: IncomingMessage, res: ServerResponse, reqId: string): P
   let upstream: Response;
   while (true) {
     try {
-      logDiagnostic('GATEWAY_CALL', reqId, \`dialing \${route.id}\`);
+      logDiagnostic('GATEWAY_CALL', reqId, `dialing ${route.id}`);
       upstream = await dial(route.id, { ...body, model: route.id });
       if (upstream.status === 429 || (upstream.status >= 500 && upstream.status <= 599)) {
-        logDiagnostic('GATEWAY_FAIL', reqId, \`status \${upstream.status} from \${route.id}\`);
+        logDiagnostic('GATEWAY_FAIL', reqId, `status ${upstream.status} from ${route.id}`);
         markCooldown(route.id);
         const next = routeFor(reqRequirements, reqId);
         if (next) {
@@ -468,7 +466,7 @@ async function start(): Promise<void> {
   if (chatCompletionsUrl() === '') throw new Error('OPENAI_BASE_URL is not set');
   const server = createServer((req, res) => {
     const reqId = Math.random().toString(36).substring(2, 9);
-    logDiagnostic('REQUEST_START', reqId, \`\${req.method} \${req.url}\`);
+    logDiagnostic('REQUEST_START', reqId, `${req.method} ${req.url}`);
     
     if (req.url === '/health') return handleHealthCheck(res);
     
